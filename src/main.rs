@@ -1,8 +1,11 @@
 use std::{thread, time::Duration};
 use std::io::{self, Write};
+use std::fs;
+use std::path::PathBuf;
 use rand::Rng;
 use rand::seq::SliceRandom;
 use enigo::*;
+use serde::{Serialize, Deserialize};
 
 type Range<T> = std::ops::Range<T>;
 
@@ -12,6 +15,7 @@ struct TypingConfig {
     mistake_probability: u32,
     correction_delay: Range<u64>,
     long_pause_probability: u32,
+    long_pause_delay: Range<u64>,
 }
 
 impl Default for TypingConfig {
@@ -22,6 +26,112 @@ impl Default for TypingConfig {
             mistake_probability: 10,
             correction_delay: 300..700,
             long_pause_probability: 5,
+            long_pause_delay: 1000..3000,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Config {
+    base_delay_min: u64,
+    base_delay_max: u64,
+    thinking_delay_min: u64,
+    thinking_delay_max: u64,
+    mistake_probability: u32,
+    correction_delay_min: u64,
+    correction_delay_max: u64,
+    long_pause_probability: u32,
+    long_pause_delay_min: u64,
+    long_pause_delay_max: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            base_delay_min: 20,
+            base_delay_max: 100,
+            thinking_delay_min: 500,
+            thinking_delay_max: 1500,
+            mistake_probability: 10,
+            correction_delay_min: 300,
+            correction_delay_max: 700,
+            long_pause_probability: 5,
+            long_pause_delay_min: 1000,
+            long_pause_delay_max: 3000,
+        }
+    }
+}
+
+impl Config {
+    fn to_typing_config(&self) -> TypingConfig {
+        TypingConfig {
+            base_delay: self.base_delay_min..self.base_delay_max,
+            thinking_delay: self.thinking_delay_min..self.thinking_delay_max,
+            mistake_probability: self.mistake_probability,
+            correction_delay: self.correction_delay_min..self.correction_delay_max,
+            long_pause_probability: self.long_pause_probability,
+            long_pause_delay: self.long_pause_delay_min..self.long_pause_delay_max,
+        }
+    }
+}
+
+fn get_config_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("config.json");
+    path
+}
+
+fn get_text_file_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("typethis.txt");
+    path
+}
+
+fn ensure_config_exists() -> Result<Config, Box<dyn std::error::Error>> {
+    let config_path = get_config_path();
+
+    if (!config_path.exists()) {
+        let config = Config::default();
+        let config_str = serde_json::to_string_pretty(&config)?;
+        fs::write(&config_path, config_str)?;
+        return Ok(config);
+    }
+
+    let config_str = fs::read_to_string(&config_path)?;
+    match serde_json::from_str(&config_str) {
+        Ok(config) => Ok(config),
+        Err(_) => {
+            // If there's an error loading the config, create a new one
+            println!("Warning: Invalid or outdated config file. Creating new config...");
+            let config = Config::default();
+            let config_str = serde_json::to_string_pretty(&config)?;
+            fs::write(&config_path, config_str)?;
+            Ok(config)
+        }
+    }
+}
+
+fn ensure_text_file_exists() -> Result<String, Box<dyn std::error::Error>> {
+    let text_path = get_text_file_path();
+
+    if (!text_path.exists()) {
+        let default_text = "Type your text here.\nType your text here.";
+        fs::write(&text_path, default_text)?;
+        return Ok(default_text.to_string());
+    }
+
+    let content = fs::read_to_string(&text_path)?;
+    if content.trim().is_empty() {
+        let default_text = "Type your text here.\nType your text here.";
+        fs::write(&text_path, default_text)?;
+        Ok(default_text.to_string())
+    } else {
+        // Normalize line endings and ensure proper text handling
+        let normalized = content.replace("\r\n", "\n");
+        if normalized.ends_with('\n') {
+            Ok(normalized[..normalized.len()-1].to_string())
+        } else {
+            Ok(normalized)
         }
     }
 }
@@ -98,114 +208,75 @@ impl HumanTypist {
     }
 
     fn type_text(&mut self, text: &str) {
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
+        for c in text.chars() {
+            match c {
+                '\n' => {
+                    self.enigo.key_click(Key::Return);
+                    thread::sleep(Duration::from_millis(
+                        self.rng.gen_range(self.config.thinking_delay.clone()),
+                    ));
+                },
+                '\r' => continue, // Skip carriage returns
+                _ => {
+                    // Thinking pause on whitespace
+                    if self.rng.gen_ratio(1, 100) && c.is_whitespace() {
+                        thread::sleep(Duration::from_millis(
+                            self.rng.gen_range(self.config.thinking_delay.clone()),
+                        ));
+                    }
 
-            if self.rng.gen_ratio(1, 100) && c.is_whitespace() {
-                thread::sleep(Duration::from_millis(
-                    self.rng.gen_range(self.config.thinking_delay.clone()),
-                ));
+                    self.type_character(c);
+
+                    // Long pause after punctuation (after typing the character)
+                    if self.rng.gen_ratio(self.config.long_pause_probability, 100)
+                        && ".,?!;:".contains(c) {
+                        thread::sleep(Duration::from_millis(
+                            self.rng.gen_range(self.config.long_pause_delay.clone()),
+                        ));
+                    }
+                }
             }
-
-
-            if self.rng.gen_ratio(1, 100) && ".,?!;:".contains(c) {
-                thread::sleep(Duration::from_millis(
-                    self.rng.gen_range(1000..3000),
-                ));
-            }
-
-
-            self.type_character(c);
-
 
             thread::sleep(Duration::from_millis(
                 self.rng.gen_range(self.config.base_delay.clone()),
             ));
         }
-
-
-        self.correct_mistakes();
     }
 
     fn type_character(&mut self, intended_char: char) {
         if self.rng.gen_ratio(1, self.config.mistake_probability) {
-
-            self.make_mistake(intended_char);
-        } else {
-
-            self.enigo.key_sequence(&intended_char.to_string());
-        }
-    }
-
-    fn make_mistake(&mut self, intended_char: char) {
-
-        let mistake_type = self.rng.gen_range(0..3);
-        let mistake_char = match mistake_type {
-            0 => self.keyboard.get_nearby_key(intended_char),
-            1 => intended_char,
-            2 => {
-
-                if let Some(&next_char) = self.mistake_buffer.last() {
-                    self.enigo.key_sequence(&next_char.to_string());
-                    self.mistake_buffer.pop();
-                }
-                intended_char
-            }
-            _ => intended_char,
-        };
-
-        if mistake_type != 1 {
-
+            // Make a simple mistake
+            let mistake_char = self.keyboard.get_nearby_key(intended_char);
             self.enigo.key_sequence(&mistake_char.to_string());
-        }
 
-
-        self.mistake_buffer.push(intended_char);
-
-
-        thread::sleep(Duration::from_millis(
-            self.rng.gen_range(self.config.correction_delay.clone()),
-        ));
-        for _ in 0..self.mistake_buffer.len() {
-            self.enigo.key_click(Key::Backspace);
-        }
-
-        for &c in &self.mistake_buffer {
-            self.enigo.key_sequence(&c.to_string());
-        }
-        self.mistake_buffer.clear();
-    }
-
-    fn correct_mistakes(&mut self) {
-        if !self.mistake_buffer.is_empty() {
-
+            // Wait a bit before correcting
             thread::sleep(Duration::from_millis(
                 self.rng.gen_range(self.config.correction_delay.clone()),
             ));
-            for _ in 0..self.mistake_buffer.len() {
-                self.enigo.key_click(Key::Backspace);
-            }
-            for &c in &self.mistake_buffer {
-                self.enigo.key_sequence(&c.to_string());
-            }
-            self.mistake_buffer.clear();
+
+            // Correct the mistake
+            self.enigo.key_click(Key::Backspace);
+            self.enigo.key_sequence(&intended_char.to_string());
+        } else {
+            self.enigo.key_sequence(&intended_char.to_string());
         }
     }
 }
 
-fn main() {
-    print!("Enter the text you want to type: ");
-    io::stdout().flush().unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = ensure_config_exists()?;
+    let text = ensure_text_file_exists()?;
 
-    let mut input_text = String::new();
-    io::stdin().read_line(&mut input_text).unwrap();
-    let input_text = input_text.trim();
+    println!("Text file location: {}", get_text_file_path().display());
+    println!("Config file location: {}", get_config_path().display());
+    println!("\nText to type:");
+    println!("{}", text);
 
-    print!("Enter the number of seconds to wait before starting: ");
-    io::stdout().flush().unwrap();
+    print!("\nEnter the number of seconds to wait before starting: ");
+    io::stdout().flush()?;
 
     let mut delay_secs = String::new();
-    io::stdin().read_line(&mut delay_secs).unwrap();
+    io::stdin().read_line(&mut delay_secs)?;
     let delay_secs: u64 = delay_secs.trim().parse().unwrap_or(5);
 
     println!("\nStarting in...");
@@ -216,5 +287,8 @@ fn main() {
     println!("Go!");
 
     let mut typist = HumanTypist::new();
-    typist.type_text(input_text);
+    typist.config = config.to_typing_config();
+    typist.type_text(&text);
+
+    Ok(())
 }

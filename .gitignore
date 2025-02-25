@@ -1,0 +1,29 @@
+# Build directory
+/target/
+
+# Rust specific files
+**/*.rs.bk
+*.pdb
+
+# Editor/IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Config and data files
+/config.json
+/typethis.txt
+
+# Debug files
+**/*.profraw
+
+# Environment files
+.env
+.env.local
+
+# Package manager files
+Cargo.lock
+
+# Were just ignoring anything that isnt code part of the program. Or dependices.
