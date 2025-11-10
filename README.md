@@ -1,2 +1,2 @@
 # Typer
-Realistic typer for windows
+Realistic typer for x11
